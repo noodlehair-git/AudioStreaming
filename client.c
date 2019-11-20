@@ -1,35 +1,19 @@
-#define _GNU_SOURCE // F_SETSIG
+// Streaming client: playaudio
 #include <stdio.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <fcntl.h>
 #include <unistd.h>
-#include <string.h>
 #include <stdlib.h>
-#include <unistd.h> 
-#include <sys/types.h> 
-#include <sys/socket.h> 
-#include <arpa/inet.h> 
+#include <sys/wait.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/time.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
-#include <stdio.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <string.h>
-#include <stdlib.h>
-#include <unistd.h> 
-#include <sys/types.h> 
-#include <sys/socket.h> 
-#include <arpa/inet.h> 
-#include <netinet/in.h>
-#include <fcntl.h>
-#include <sys/file.h>
-#include <sys/signal.h>
-#include <stdlib.h>
-#include <errno.h>
 #define SA struct sockaddr
 
 void createUDP();
@@ -163,10 +147,10 @@ int main(int argc, char** argv) {
 		fd_set readfds;
 		FD_ZERO(&readfds);
 		FD_SET( udp_sock, &readfds);
-		n = udp_sock + 1;
+		int n = udp_sock + 1;
 		tv.tv_sec = 1/fl_Gamma;
 		tv.tv_usec = 0;
-		activity = select(n, &readfds, NULL, NULL, NULL);
+		int activity = select(n, &readfds, NULL, NULL, NULL);
 
 		if (activity < 0){
             		printf("select error");
@@ -180,6 +164,7 @@ int main(int argc, char** argv) {
 		else{	if(flag==0){
 				printf("\n Activity detected on UDP sock....");
 				prepare_feedback();
+				socklen_t len = 0;
 				if ((read_bytes = recvfrom(udp_sock, (char *)audio_data, sizeof(audio_data), 0, (struct sockaddr *) &udp_servaddr, &len)) > 0){
 					if((audio_data[0]=='5')&&(audio_data[1]=='5')&&(audio_data[2]=='5')&&(audio_data[3]=='5')){
 						printf("\n Transmission Complete");
