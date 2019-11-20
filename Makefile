@@ -7,7 +7,7 @@ streamerd: server.o
 		$(CC) -o streamerd server.o
 
 playaudio: client.o
-		$(CC) -o playaudio client.o
+		$(CC) -pthread -o playaudio client.o
 
 clean:
 	@echo removing .o files
