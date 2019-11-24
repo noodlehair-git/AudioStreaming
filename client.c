@@ -18,22 +18,17 @@
 #include <time.h>
 #define SA struct sockaddr
 
-void createUDP();
-void recv_audio_data_and_send_feedback();
-void mulawopen(size_t *bufsiz);
-void mulawclose(void);
-
 struct sockaddr_in tcp_servaddr, udp_servaddr, cliaddr;
-int tcp_sock, udp_sock, read_bytes, srv_udp_port, tcp_port, cli_udp_port, buf_size, target_buf, flag;
-size_t block_size;
+int tcp_sock, cli_udp_sock, read_bytes, tcp_port, cli_udp_port, buf_size, target_buf, flag;
+unsigned int srv_udp_port, block_size;
 float Gamma, Q, Q_star;
-char ip[15], tcp_ip[15], audio_data[1500], buf[3000];
-char audiofile[100], logfile[100];
-char * audio_buf;
-struct ifreq ifr;
-socklen_t length;
+char tcp_ip[15], audiofile[100], logfile[100];
+char * audio_buf, * audio_data;
 struct timeval tv;
 struct timespec ts;
+struct timespec rem;
+
+int total_bytes_read; // Debugging purposes
 
 // Read and write positions for circular buffer
 int read_pos, write_pos;
@@ -46,138 +41,53 @@ static snd_pcm_uframes_t mulawfrms;
 
 #define mulawwrite(x) snd_pcm_writei(mulawdev, x, mulawfrms)
 
-int main(int argc, char** argv) {
-	if(argc < 8){
-		printf("Please input all arguments: [tcp-ip][tcp-port][audiofile][block-size][gamma][buf-size][target-buf][logfile]\n");
-		exit(1);
+void update_Q(){
+	// Buffer occupancy; Sets current buffer level
+	if(read_pos < write_pos){
+		Q = write_pos - read_pos;
 	}
-
-	//Processing command-line input arguments
-	strcpy(tcp_ip,(argv[1]));
-	tcp_port = atoi(argv[2]);
-	strcpy(audiofile,(argv[3]));
-	audiofile[strlen(argv[3])] = '\0'; // TODO: Check if necessary
-	block_size = atoi(argv[4]);
-	Gamma = atof(argv[5]);
-	buf_size = atoi(argv[6]);
-	Q_star = target_buf = atoi(argv[7]);
-	strcpy(logfile,(argv[8]));
-
-	// Initialize Sleep time
-	ts.tv_sec = 0;
-	ts.tv_sec = Gamma * 1000000L; // Assume Gamma is given is Msec for now
-
-	audio_buf = (char *) malloc(buf_size); // Allocate memory circular audio buffer
-	read_pos = write_pos = 0; // Initialize read and write positio to 0
-	if(sem_init(&mutex, 1, 1) < 0){
-		perror("Error with semahore intialization");
-		exit(0);
+	else{
+		Q = buf_size - read_pos + write_pos; // Account for wrap around
 	}
+}
 
-	if ((tcp_sock = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
-		printf("socket creation failed...\n");
-		exit(0);
-	}
-
-	// Filling server information
-	// IP address of server and port number provided as command line argument
-	tcp_servaddr.sin_family = AF_INET;
-	tcp_servaddr.sin_port = htons(tcp_port);
-	tcp_servaddr.sin_addr.s_addr = inet_addr(tcp_ip);
-
-	// // Outer while loop necessary for control plane
-	// while(1){
-	// connect the client socket to server socket
-	if (connect(tcp_sock, (SA*)&tcp_servaddr, sizeof(tcp_servaddr)) != 0) {
-		printf("connection with the server failed...\n");
-		exit(0);
-	}
-
-	// Sends audio file name to server
-	write(tcp_sock, audiofile, strlen(audiofile));
-
-	char tmp[5];
-	// Read response from server whether file exists
-	if(read(tcp_sock, tmp, sizeof(tmp)) > 0){
-		if(tmp[0] != '2'){
-			printf("File does not exist on server\n");
-			exit(0);
-		}
-	}
-
-	unsigned int file_size;
-	// Copy server-udp-port from tmp buf
-	memcpy(&srv_udp_port, tmp+1, 4);
-	memcpy(&file_size, tmp+5, 4);
-
-	printf("Filesize: %u\n", file_size);
-
-	// Establishes relevant variables for UDP
-	createUDP();
-
-	printf("Client Udp port: %d\n", cli_udp_port);
-
-	// Sends client-udp-port to server
-	char sendbuf[4];
-	memcpy(sendbuf, &cli_udp_port, 4);
-	write(tcp_sock, sendbuf, sizeof(sendbuf));
-
-	printf("Hit before child\n");
-	int k = fork();
-	if(k == 0){
-		printf("Hit in child\n");
-		// Signal SIGIO
-		signal(SIGIO, recv_audio_data_and_send_feedback);
-			// We must own the socket to receive the SIGIO message
-		if (fcntl(udp_sock, F_SETOWN, getpid()) < 0)
-			printf("Unable to set process owner to us");
-
-		// Arrange for nonblocking I/O and SIGIO delivery. TODO: Is nonblocking necessary?
-		if (fcntl(udp_sock, F_SETFL, FASYNC) < 0)
-			printf("Unable to put client sock into non-blocking/async mode");
-			
-		
+int add_to_buf(char c){
+	sem_wait(&mutex);
+	int next;
+	next = write_pos + 1;
 	
-		// Consumer loop to read from buffer. Handles reading audio packets
-		while (1){
-			mulawopen(&block_size);		// initialize audio codec
-			char * temp_buf = (char *) malloc(block_size);
-			while(Q >= Q_star){ // Client commences playback after prefetching reaches Q*
-				printf("Reading\n");
-				sem_wait(&mutex);
-
-				for(int i = 0; i < block_size; i++){
-					char c = audio_buf[read_pos];
-					temp_buf[i] = c;
-					read_pos = (read_pos + 1) % buf_size;
-					Q--;
-					// printf("Read pos: %d\n", read_pos);
-				}
-				sem_post(&mutex);
-				mulawwrite(temp_buf);
-				// nanosleep(&ts, NULL);
-				usleep(Gamma);
-			}
-			mulawclose();					
-		}
+	if(next >= buf_size){
+		next = 0;
 	}
+	if(next == read_pos){ // write_pos + 1 == read_pos; buffer is full
+		return -1;
+	}
+	audio_buf[write_pos] = c;
+	write_pos = next;
+	update_Q();
+	sem_post(&mutex);
+	return 0;
+}
 
-	while(1){
-		char recv_buf[2];
-		recv(tcp_sock, recv_buf, 1, 0);
-		// printf("Recv buf[0]: %d\n", recv_buf[0]);
-		// printf("Recvbuf [1]: %c\n", recv_buf[1]);
-		if(recv_buf[0] == '5'){
-			printf("Hit here\n");
-			printf("Termination Received\n");
-			kill(k, SIGKILL); // Kill Child Process
-			exit(0);
-		}
-	}	
+int remove_from_buf(char * data){
+	sem_wait(&mutex);
+	int next;
+	next = read_pos + 1;
+	if(read_pos == write_pos){ // Buffer is empty
+		return -1;
+	}
+	if(next >= buf_size){
+		next = 0;
+	}
+	*data = audio_buf[read_pos];
+	read_pos = next;
+	update_Q();
+	sem_post(&mutex);
+	return 0;
 }
 
 void createUDP(){
-	if ((udp_sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0 ) {
+	if ((cli_udp_sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0 ) {
 		perror("socket creation failed");
 		exit(EXIT_FAILURE);
 	}
@@ -186,17 +96,11 @@ void createUDP(){
 	udp_servaddr.sin_port = htons(srv_udp_port);
 	udp_servaddr.sin_addr.s_addr = inet_addr(tcp_ip);
 
-	//Getting the IP address of eth0 interface used by the host
-	ifr.ifr_addr.sa_family = AF_INET;
-	strncpy(ifr.ifr_name, "eth0", IFNAMSIZ-1);
-	ioctl(udp_sock, SIOCGIFADDR, &ifr);
-	strcpy(ip, inet_ntoa(((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr));
-
 	cliaddr.sin_family = AF_INET;
 	cliaddr.sin_port = htons(0);
 	cliaddr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-	if(bind(udp_sock, (const struct sockaddr *)&cliaddr, sizeof(cliaddr)) < 0 ){
+	if(bind(cli_udp_sock, (const struct sockaddr *)&cliaddr, sizeof(cliaddr)) < 0 ){
 		perror("bind failed");
 		exit(EXIT_FAILURE);
 	}
@@ -205,12 +109,10 @@ void createUDP(){
 	struct sockaddr_in bound_addr;
 	socklen_t size = sizeof(bound_addr);
 	//Fetching the port number assigned by the OS to the server and displaying it for the client to use
-	if (getsockname(udp_sock, (struct sockaddr *)&bound_addr, &size) == -1)
+	if (getsockname(cli_udp_sock, (struct sockaddr *)&bound_addr, &size) == -1)
 		perror("getsockname failed");
 	
-	fprintf(stdout,"Server UDP port number: %d\n", ntohs(udp_servaddr.sin_port));
 	cli_udp_port = ntohs(bound_addr.sin_port);
-
 }
 
 void recv_audio_data_and_send_feedback(){
@@ -219,40 +121,35 @@ void recv_audio_data_and_send_feedback(){
 	socklen_t srv_addr_size = sizeof(udp_servaddr);
 	ssize_t bytes_read;
 
-	bytes_read = recvfrom(udp_sock, (char *)audio_data, sizeof(audio_data), 0,
+	bytes_read = recvfrom(cli_udp_sock, (char *)audio_data, block_size + 4, 0,
 		 (struct sockaddr *) &udp_servaddr, &srv_addr_size);
 
-	// Write to buffer. TODO: MAKE SURE SERVER IS SENDING SEQ NO
-	sem_wait(&mutex);
-	for(int i = 0; i < bytes_read; i++){ // Write to buffer excluding seq no
-		audio_buf[write_pos] = audio_data[i];
-		write_pos = (write_pos + 1) % buf_size;
-	}
-	sem_post(&mutex);
+	printf("Bytes received from server: %ld\n", bytes_read);
+	total_bytes_read += bytes_read;
+	printf("Total bytes received: %d\n", total_bytes_read);
 
-		// Buffer occupancy; Sets current buffer level
-	if(read_pos < write_pos){ // TODO: Check that this is correct
-		Q = write_pos - read_pos;
-	}
-	else{
-		Q = buf_size - read_pos + write_pos; // Account for wrap around
+	for(int i = 4; i < bytes_read; i++){ // Write to buffer excluding seq no
+		int ret = add_to_buf(audio_data[i]);
+		if(ret == -1){
+			printf("Buffer full in writing. Q: %f\n", Q);
+		}
 	}
 
-
-	// printf("Hit in recv audio data\n");
-	// printf("Q: %f\n", Q);
-	// printf("Q_star: %f\n", Q_star);
-	// printf("Gamma: %f\n", Gamma);
+	printf("Finished producing. Q: %f\n", Q);
 
 	memcpy(feedback, &Q, 4); // Copies Q into feedback
 	memcpy(feedback + 4, &Q_star, 4); // Copies Q_star (target_buf) into feedback
 	memcpy(feedback + 8, &Gamma, 4); // Copies Gamma into feedback
 
-	int bytes_sent = sendto(udp_sock, (const char *)feedback, sizeof(feedback), 0,
+	int bytes_sent = sendto(cli_udp_sock, (const char *)feedback, sizeof(feedback), 0,
 	 (const struct sockaddr *) &udp_servaddr, sizeof(udp_servaddr)); // Send feedback to server
 
 	// Reset sleep timer upon Signal
-	// nanosleep(&ts, NULL);
+	if(rem.tv_sec != 0 && rem.tv_nsec != 0){ // Case where signal handler is called before first nanosleep is called
+		ts.tv_sec = rem.tv_sec;
+		ts.tv_nsec = rem.tv_nsec; // Assume Gamma is given is Msec for now
+	}
+	nanosleep(&ts, &rem);
 }
 
 void mulawopen(size_t *bufsiz) {
@@ -275,4 +172,143 @@ void mulawopen(size_t *bufsiz) {
 void mulawclose(void) {
 	snd_pcm_drain(mulawdev);
 	snd_pcm_close(mulawdev);
+}
+
+int main(int argc, char** argv) {
+	if(argc < 8){
+		printf("Please input all arguments: [tcp-ip][tcp-port][audiofile][block-size][gamma][buf-size][target-buf][logfile]\n");
+		exit(1);
+	}
+
+	total_bytes_read = 0;
+	//Processing command-line input arguments
+	strcpy(tcp_ip,(argv[1]));
+	tcp_port = atoi(argv[2]);
+	strcpy(audiofile,(argv[3]));
+	audiofile[strlen(argv[3])] = '\0'; // TODO: Check if necessary
+	block_size = atoi(argv[4]);
+	Gamma = atof(argv[5]);
+	buf_size = atoi(argv[6]);
+	Q_star = target_buf = atoi(argv[7]);
+	strcpy(logfile,(argv[8]));
+	audio_data = (char *) malloc(1500);
+
+	// Initialize Sleep time
+	ts.tv_sec = 0;
+	ts.tv_nsec = Gamma * 1000000L; // Assume Gamma is given is Msec for now
+
+	audio_buf = (char *) malloc(buf_size); // Allocate memory circular audio buffer
+	read_pos = write_pos = 0; // Initialize read and write positio to 0
+	if(sem_init(&mutex, 1, 1) < 0){
+		perror("Error with semahore intialization");
+		exit(0);
+	}
+
+	if ((tcp_sock = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+		printf("socket creation failed...\n");
+		exit(0);
+	}
+
+	// Filling server information
+	// IP address of server and port number provided as command line argument
+	tcp_servaddr.sin_family = AF_INET;
+	tcp_servaddr.sin_port = htons(tcp_port);
+	tcp_servaddr.sin_addr.s_addr = inet_addr(tcp_ip);
+
+	// connect the client socket to server socket
+	if (connect(tcp_sock, (SA*)&tcp_servaddr, sizeof(tcp_servaddr)) != 0) {
+		printf("connection with the server failed...\n");
+		exit(0);
+	}
+
+	// Sends audio file name to server
+	write(tcp_sock, audiofile, strlen(audiofile));
+
+	char tmp[9];
+	// Read response from server whether file exists
+	if(read(tcp_sock, tmp, sizeof(tmp)) > 0){
+		if(tmp[0] != '2'){
+			printf("File does not exist on server\n");
+			exit(0);
+		}
+	}
+
+	unsigned int file_size;
+	memcpy(&srv_udp_port, tmp+1, 4); // Copy server-udp-port from tmp buf
+	memcpy(&file_size, tmp+5, 4);
+
+	printf("Filesize: %d\n", file_size);
+	printf("Server UDP port: %d\n", srv_udp_port);
+
+	createUDP(); // Establishes relevant variables for UDP
+
+	printf("Client UDP port: %d\n", cli_udp_port);
+
+	// Sends client-udp-port to server
+	char sendbuf[4];
+	memcpy(sendbuf, &cli_udp_port, 4);
+	write(tcp_sock, sendbuf, sizeof(sendbuf));
+
+	int k = fork();
+	if(k == 0){
+		size_t audio_blk_size;
+		mulawopen(&audio_blk_size);		// initialize audio codec
+		char * output_audio_buf = (char *) malloc(audio_blk_size);
+		// Signal SIGIO
+		signal(SIGIO, recv_audio_data_and_send_feedback);
+		// We must own the socket to receive the SIGIO message
+		if (fcntl(cli_udp_sock, F_SETOWN, getpid()) < 0)
+			printf("Unable to set process owner to us");
+
+		// Arrange for nonblocking I/O and SIGIO delivery. TODO: Is nonblocking necessary?
+		if (fcntl(cli_udp_sock, F_SETFL, FASYNC) < 0)
+			printf("Unable to put client sock into non-blocking/async mode");
+		
+		int blocks_read = 0;
+		// Consumer loop to read from buffer. Handles reading audio packets
+		while (blocks_read <= file_size){
+			// printf("While. Q: %f\n", Q);
+			if(Q >= audio_blk_size){ // Client commences playback after prefetching reaches Q*
+				printf("Reading\n");
+				printf("Q: %f\n", Q);
+				printf("Q_star: %f\n", Q_star);
+
+				for(int i = 0; i < audio_blk_size; i++){
+					char c;
+					int ret = remove_from_buf(&c);
+					if(ret == -1){
+						printf("Buffer empty in reading\n");
+					}
+					else{
+						output_audio_buf[i] = c;
+					}
+				}
+
+				printf("Finished Consuming. Q: %f\n", Q);
+				mulawwrite(output_audio_buf);
+				blocks_read += audio_blk_size;
+				
+				// Initialize Sleep time
+				ts.tv_sec = 0;
+				ts.tv_nsec = Gamma * 1000000; // Assume Gamma is given is Msec for now
+
+				nanosleep(&ts, &rem);
+				// usleep(Gamma);
+			}
+		}
+		mulawclose();					
+	}
+
+	while(1){ // Parent Process
+		char recv_buf[2];
+		recv(tcp_sock, recv_buf, 1, 0);
+		// printf("Recv buf[0]: %d\n", recv_buf[0]);
+		// printf("Recvbuf [1]: %c\n", recv_buf[1]);
+		if(recv_buf[0] == '5'){
+			printf("Hit here\n");
+			printf("Termination Received\n");
+			kill(k, SIGKILL); // Kill Child Process
+			exit(0);
+		}
+	}	
 }
