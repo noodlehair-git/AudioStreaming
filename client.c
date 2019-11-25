@@ -52,7 +52,7 @@ void update_Q(){
 }
 
 int add_to_buf(char c){
-	sem_wait(&mutex);
+	// sem_wait(&mutex);
 	int next;
 	next = write_pos + 1;
 	
@@ -65,12 +65,12 @@ int add_to_buf(char c){
 	audio_buf[write_pos] = c;
 	write_pos = next;
 	update_Q();
-	sem_post(&mutex);
+	// sem_post(&mutex);
 	return 0;
 }
 
 int remove_from_buf(char * data){
-	sem_wait(&mutex);
+	// sem_wait(&mutex);
 	int next;
 	next = read_pos + 1;
 	if(read_pos == write_pos){ // Buffer is empty
@@ -82,7 +82,7 @@ int remove_from_buf(char * data){
 	*data = audio_buf[read_pos];
 	read_pos = next;
 	update_Q();
-	sem_post(&mutex);
+	// sem_post(&mutex);
 	return 0;
 }
 
@@ -115,6 +115,9 @@ void createUDP(){
 	cli_udp_port = ntohs(bound_addr.sin_port);
 }
 
+// void recv_audio_data_and_send_feedback(){
+// 		printf("Hit in recvaudio\n");
+// }
 void recv_audio_data_and_send_feedback(){
 	printf("Hit in recvaudio\n");
 	char feedback[12];
@@ -124,18 +127,20 @@ void recv_audio_data_and_send_feedback(){
 	bytes_read = recvfrom(cli_udp_sock, (char *)audio_data, block_size + 4, 0,
 		 (struct sockaddr *) &udp_servaddr, &srv_addr_size);
 
-	printf("Bytes received from server: %ld\n", bytes_read);
+	// printf("Bytes received from server: %ld\n", bytes_read);
 	total_bytes_read += bytes_read;
-	printf("Total bytes received: %d\n", total_bytes_read);
+	// printf("Total bytes received: %d\n", total_bytes_read);
 
+	sem_wait(&mutex);
 	for(int i = 4; i < bytes_read; i++){ // Write to buffer excluding seq no
 		int ret = add_to_buf(audio_data[i]);
 		if(ret == -1){
 			printf("Buffer full in writing. Q: %f\n", Q);
 		}
 	}
+	sem_post(&mutex);
 
-	printf("Finished producing. Q: %f\n", Q);
+	// printf("Finished producing. Q: %f\n", Q);
 
 	memcpy(feedback, &Q, 4); // Copies Q into feedback
 	memcpy(feedback + 4, &Q_star, 4); // Copies Q_star (target_buf) into feedback
@@ -199,9 +204,10 @@ int main(int argc, char** argv) {
 
 	audio_buf = (char *) malloc(buf_size); // Allocate memory circular audio buffer
 	read_pos = write_pos = 0; // Initialize read and write positio to 0
+	
 	if(sem_init(&mutex, 1, 1) < 0){
-		perror("Error with semahore intialization");
-		exit(0);
+			perror("Error with semahore intialization");
+			exit(0);
 	}
 
 	if ((tcp_sock = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
@@ -255,7 +261,20 @@ int main(int argc, char** argv) {
 		mulawopen(&audio_blk_size);		// initialize audio codec
 		char * output_audio_buf = (char *) malloc(audio_blk_size);
 		// Signal SIGIO
-		signal(SIGIO, recv_audio_data_and_send_feedback);
+		// signal(SIGIO, recv_audio_data_and_send_feedback);
+		struct sigaction handler;
+		//Set signal handler for SIGIO 
+		handler.sa_handler = recv_audio_data_and_send_feedback;
+		handler.sa_flags = 0;
+
+		//Create mask that mask all signals 
+		if (sigfillset(&handler.sa_mask) < 0) 
+			printf("sigfillset() failed");
+		//No flags 
+		handler.sa_flags = 0;
+
+		if (sigaction(SIGIO, &handler, 0) < 0)
+			printf("sigaction() failed for SIGIO");
 		// We must own the socket to receive the SIGIO message
 		if (fcntl(cli_udp_sock, F_SETOWN, getpid()) < 0)
 			printf("Unable to set process owner to us");
@@ -273,6 +292,7 @@ int main(int argc, char** argv) {
 				printf("Q: %f\n", Q);
 				printf("Q_star: %f\n", Q_star);
 
+				sem_wait(&mutex);
 				for(int i = 0; i < audio_blk_size; i++){
 					char c;
 					int ret = remove_from_buf(&c);
@@ -283,6 +303,7 @@ int main(int argc, char** argv) {
 						output_audio_buf[i] = c;
 					}
 				}
+				sem_post(&mutex);
 
 				printf("Finished Consuming. Q: %f\n", Q);
 				mulawwrite(output_audio_buf);

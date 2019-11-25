@@ -82,11 +82,11 @@ void client_feedback_handler(){
 	printf("Sleep time: %f\n", 1/lambda);
 
 	// Reset sleep timer upon Signal
-	if(rem.tv_sec != 0 && rem.tv_nsec != 0){ // Case where signal handler is called before first nanosleep is called
-		ts.tv_sec = rem.tv_sec;
-		ts.tv_nsec = rem.tv_nsec; // Assume Gamma is given is Msec for now
-	}
-	nanosleep(&ts, &rem);
+	// if(rem.tv_sec != 0 && rem.tv_nsec != 0){ // Case where signal handler is called before first nanosleep is called
+	// 	ts.tv_sec = rem.tv_sec;
+	// 	ts.tv_nsec = rem.tv_nsec; // Assume Gamma is given is Msec for now
+	// }
+	// nanosleep(&ts, &rem);
 }
 
 //Creating a UDP socket for communication
@@ -267,7 +267,17 @@ int main(int argc, char** argv) {
 				k = fork();
 				if (k==0) {
 					// Signal SIGIO in the child process.
-					signal(SIGIO, client_feedback_handler);
+					// signal(SIGIO, client_feedback_handler);
+					struct sigaction handler;
+					//Set signal handler for SIGIO 
+					handler.sa_handler = client_feedback_handler;
+					handler.sa_flags = 0;
+
+					//Create mask that mask all signals 
+					if (sigfillset(&handler.sa_mask) < 0) 
+						printf("sigfillset() failed");
+					//No flags 
+					handler.sa_flags = 0;
 
 					// We must own the socket to receive the SIGIO message
 					if (fcntl(srv_udp_sock, F_SETOWN, getpid()) < 0)
@@ -284,7 +294,7 @@ int main(int argc, char** argv) {
 					int num_read = 0;
 					char * audio_data_pkt = (char *) malloc(payload_size + 4); // Includes sequence no
 					// Read packets of audio file and transmit via UDP
-					while((file_bytes_read = read(audio_file_fd, audio_data, payload_size)) > 0){
+					while((file_bytes_read = read(audio_file_fd, audio_data, payload_size)) > 0){						
 						audio_data[file_bytes_read] = 0x00; // Set last byte to 0
 						int seq_no = count % 2;
 						memcpy(&audio_data_pkt, &seq_no, 4);
