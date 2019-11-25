@@ -40,6 +40,7 @@ static snd_pcm_t *mulawdev;
 static snd_pcm_uframes_t mulawfrms;
 
 #define mulawwrite(x) snd_pcm_writei(mulawdev, x, mulawfrms)
+void packet_recvd();
 
 void update_Q(){
 	// Buffer occupancy; Sets current buffer level
@@ -118,8 +119,10 @@ void createUDP(){
 // void recv_audio_data_and_send_feedback(){
 // 		printf("Hit in recvaudio\n");
 // }
-void recv_audio_data_and_send_feedback(){
-	printf("Hit in recvaudio\n");
+
+void packet_recvd(){
+
+	printf("Hit in packet_recvd\n");
 	char feedback[12];
 	socklen_t srv_addr_size = sizeof(udp_servaddr);
 	ssize_t bytes_read;
@@ -155,6 +158,13 @@ void recv_audio_data_and_send_feedback(){
 		ts.tv_nsec = rem.tv_nsec; // Assume Gamma is given is Msec for now
 	}
 	nanosleep(&ts, &rem);
+
+
+}
+void recv_audio_data_and_send_feedback(){
+
+	printf("Hit in receive audio\n");
+	flag =1;
 }
 
 void mulawopen(size_t *bufsiz) {
@@ -180,6 +190,7 @@ void mulawclose(void) {
 }
 
 int main(int argc, char** argv) {
+	flag = 0;
 	if(argc < 8){
 		printf("Please input all arguments: [tcp-ip][tcp-port][audiofile][block-size][gamma][buf-size][target-buf][logfile]\n");
 		exit(1);
@@ -287,6 +298,10 @@ int main(int argc, char** argv) {
 		// Consumer loop to read from buffer. Handles reading audio packets
 		while (blocks_read <= file_size){
 			// printf("While. Q: %f\n", Q);
+			if(flag == 1){
+				flag = 0;
+				packet_recvd();
+			}
 			if(Q >= audio_blk_size){ // Client commences playback after prefetching reaches Q*
 				printf("Reading\n");
 				printf("Q: %f\n", Q);

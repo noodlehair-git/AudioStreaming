@@ -225,7 +225,7 @@ int main(int argc, char** argv) {
 			bytes_read = read(connfd, filename, sizeof(filename));
 			filename[bytes_read] = '\0';
 			
-			strcpy(tmp_path, "/tmp/");
+			strcpy(tmp_path, "/homes/arora105/lab/");
 			strcat(tmp_path, filename);
 			printf("tmp path: %s\n", tmp_path);
 			FILE * tmp_file;
