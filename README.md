@@ -1,4 +1,4 @@
-# CS536-Lab6
+# Audio Streaming Client-Server App
 
 To run the server:
 ./streamerd 1235 1488 0.01 0 logfile1
